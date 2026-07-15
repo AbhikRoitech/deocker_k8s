@@ -8,6 +8,48 @@ Postgres) into a secure AWS 4-tier network. Follow the phases in order. Each pha
 
 ## 0. Target architecture (what we are building)
 
+### Simplified view (the mental model — start here)
+
+Three tiers, each more locked-down than the one above it: public web → private app → isolated data.
+
+```
+                        INTERNET
+                           │
+                    ┌──────────────┐
+                    │ Internet GW  │
+                    └──────────────┘
+                           │
+                     PUBLIC SUBNET
+      ┌────────────────────────────────────────┐
+      │  React frontend (served via web EC2/S3) │
+      │  Load Balancer (ALB)                     │
+      └────────────────────────────────────────┘
+                           │
+                           ▼
+                    PRIVATE SUBNET
+      ┌────────────────────────────────────────┐
+      │  Express + Node.js API                   │
+      └────────────────────────────────────────┘
+                           │
+                           ▼
+                PRIVATE ISOLATED SUBNET
+      ┌────────────────────────────────────────┐
+      │  PostgreSQL / RDS                        │
+      │  Redis cache                             │
+      │  Secrets Manager endpoint                │
+      └────────────────────────────────────────┘
+```
+
+- **Public subnet** = the only tier reachable from the internet (users + the load balancer).
+- **Private subnet** = the app logic; reachable *only* from the public tier, never directly from users.
+- **Private isolated subnet** = the crown jewels (data + secrets); reachable *only* from the app tier,
+  with **no internet access at all**.
+
+The detailed diagram below is the same idea, just split into the exact subnets/instances we build
+(the app tier becomes app1+app2, the data tier splits into cache and db, etc.).
+
+### Detailed view (exact subnets & instances)
+
 ```
                           Internet
                              │
@@ -63,7 +105,7 @@ Postgres) into a secure AWS 4-tier network. Follow the phases in order. Each pha
 
 ---
 
-## Phase 1 — VPC skeleton (network foundation)
+## Phase 1 — VPC skeleton (network foundation)  ✅ DONE (2026-07-12)
 
 1. Create VPC `prod-vpc` `10.0.0.0/16`.
 2. Create 5 subnets across (ideally) 2 AZs:
@@ -90,28 +132,13 @@ Postgres) into a secure AWS 4-tier network. Follow the phases in order. Each pha
 
 ---
 
-## Phase 2 — Bastion / admin access (how you'll reach private instances)
-
-You have two options. Do **Option B** if you want the modern secure path; do A if the lab expects SSH.
-
-- **Option A — SSH bastion:** the `web` EC2 doubles as a jump host. SSH into `web` from your IP,
-  then SSH from `web` into private instances using the same key.
-- **Option B — SSM Session Manager (recommended, no SSH, no bastion):** attach an IAM role with
-  `AmazonSSMManagedInstanceCore` to every instance; connect via Session Manager. No port 22 open
-  anywhere, no keys on disk. Private instances reach SSM through the NAT (app1/cache) or via VPC
-  endpoints (app2/db).
-
-**Focus / verify after Phase 2:**
-- The security win: **your database and backend never have port 22 open to the internet.** Admin
-  access is either one narrow hole (bastion from your IP/32) or zero holes (SSM).
-- Decide now, because it changes the SSH rules in the security groups below.
-
----
-
-## Phase 3 — Security Groups (the core of this exercise)
+## Phase 2 — Security Groups (the core of this exercise)  ✅ DONE (2026-07-12)
 
 Create these **before** launching instances. The golden rule: **source = another security group,
 not a CIDR.** SG references mean "whatever instance carries that SG," so IPs never matter.
+
+> The port-**22 (SSH)** rules below depend on your admin-access choice in **Phase 3**: keep them for
+> the SSH-bastion path (Option A), or omit every `22` rule if you use SSM (Option B).
 
 ### `sg-web`  → attached to EC2 `web` (public/front door)
 | Dir | Port     | Source / Dest        | Why                                                   |
@@ -168,11 +195,30 @@ crown-jewel tier.
 | `dbcache` | `sg-cache`     | `app` only (6379)             | db:5432, internet:443             |
 | `db`/RDS  | `sg-db`        | `app` + `cache` only (5432)   | nothing                           |
 
-**Focus / verify after Phase 3:**
+**Focus / verify after Phase 2:**
 - Trace one request end-to-end on paper: browser → `sg-web` :443 → nginx → `sg-app` :8000 →
   Express → `sg-db` :5432. Every hop is allowed by exactly one SG rule and nothing wider.
 - Note app2 vs app1: **identical SG, different subnet route table** → app2 has no internet. SGs
   control *who can talk to the instance*; route tables control *where the instance can go*.
+
+---
+
+## Phase 3 — Bastion / admin access (how you'll reach private instances)  ✅ DONE (2026-07-12) — Option A (SSH bastion)
+
+You have two options. Do **Option B** if you want the modern secure path; do A if the lab expects SSH.
+
+- **Option A — SSH bastion:** the `web` EC2 doubles as a jump host. SSH into `web` from your IP,
+  then SSH from `web` into private instances using the same key.
+- **Option B — SSM Session Manager (recommended, no SSH, no bastion):** attach an IAM role with
+  `AmazonSSMManagedInstanceCore` to every instance; connect via Session Manager. No port 22 open
+  anywhere, no keys on disk. Private instances reach SSM through the NAT (app1/cache) or via VPC
+  endpoints (app2/db).
+
+**Focus / verify after Phase 3:**
+- The security win: **your database and backend never have port 22 open to the internet.** Admin
+  access is either one narrow hole (bastion from your IP/32) or zero holes (SSM).
+- This choice sets the port-22 rules in the **Phase 2 security groups above**: keep the `22` rules
+  for Option A, or remove them all for Option B (SSM).
 
 ---
 
