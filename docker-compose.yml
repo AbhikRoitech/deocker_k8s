@@ -1,0 +1,85 @@
+# Project 1 — run the whole PERN stack locally with: docker compose up --build
+# Services resolve each other by name over the user-defined `todo-net` network.
+# The client's nginx proxies /api/ -> http://api:8000, so the API service MUST be
+# named `api`.
+
+services:
+  # --- PostgreSQL database ---
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # named volume -> data survives `compose down`
+    ports:
+      - "5432:5432"                       # exposed for local psql/debugging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - todo-net
+
+  # --- One-shot DB migration: creates the todos table, then exits 0 ---
+  migrate:
+    build: ./server
+    command: npm run migrate
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PGDATABASE}
+      PGUSER: ${PGUSER}
+      PGPASSWORD: ${PGPASSWORD}
+      PGSSL: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - todo-net
+
+  # --- Express API (must be named `api` for the client nginx proxy) ---
+  api:
+    build: ./server
+    environment:
+      PORT: "8000"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PGDATABASE}
+      PGUSER: ${PGUSER}
+      PGPASSWORD: ${PGPASSWORD}
+      PGSSL: "false"
+    ports:
+      - "8000:8000"                       # exposed for curl http://localhost:8000/health
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - todo-net
+
+  # --- React build served by nginx (static dist + /api proxy) ---
+  client:
+    build: ./client
+    ports:
+      - "8080:80"                         # open http://localhost:8080
+    depends_on:
+      - api
+    networks:
+      - todo-net
+
+volumes:
+  pgdata:
+
+networks:
+  todo-net:

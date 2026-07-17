@@ -1,0 +1,10 @@
+# Never copy these into the build context / image.
+node_modules
+npm-debug.log
+dist
+.env
+.git
+.gitignore
+Dockerfile
+.dockerignore
+*.md
